@@ -12,7 +12,7 @@ const END = "    // END conversion-presets";
 const L = {
   en: {
     name: (f, t) => `${f} to ${t}`,
-    desc: (f, t) => `Convert ${f} to ${t} online. Fast, free, private, no signup.`,
+    desc: (f, t) => `Convert ${f} to ${t}`,
   },
   de: {
     name: (f, t) => `${f} in ${t} umwandeln`,

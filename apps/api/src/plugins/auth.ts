@@ -26,8 +26,9 @@ import {
   recordLoginFailure,
 } from "../lib/login-throttle.js";
 import { authAttempts } from "../lib/metrics.js";
+import { normalizePassword, passwordCandidates } from "../lib/password-form.js";
 import { isSecureRequest } from "../lib/secure-cookie.js";
-import { getSettingNumber, getSettingString } from "../lib/settings-helpers.js";
+import { getSettingNumber, getSettingStrict, getSettingString } from "../lib/settings-helpers.js";
 import { userLimitReached } from "../lib/user-limit.js";
 import {
   canAssignRole,
@@ -70,22 +71,73 @@ export async function verifyPassword(password: string, stored: string): Promise<
 }
 
 /**
- * Fixed-cost hash used to equalize login timing for usernames that don't
- * exist (or have no local password). Computed once per process and cached;
- * without this, a login attempt for an unknown username returns as soon as
- * the user lookup misses, while a wrong password for a real user waits on a
- * full scrypt run. That gap is a timing side-channel an attacker can use to
- * enumerate valid usernames even though both cases return an identical 401
- * body. Running verifyPassword against this dummy hash pays the same scrypt
- * cost on the "unknown user" path so the two cases are timing-indistinguishable.
+ * Check a typed password against a stored user hash (#2056). The normalized form is
+ * tried first, since that is what every hash made from now on is built from; when the
+ * text as typed differs from it, that is tried second, because a hash made before
+ * normalization was built from the raw text. `legacy` says the second try is the one
+ * that matched, so the caller can upgrade the hash. API keys and SCIM tokens do not go
+ * through this; they are compared as they are with verifyPassword.
+ *
+ * The number of scrypt runs depends only on the typed text, never on whether the user
+ * exists: the unknown-user path in login runs this same function against a dummy hash.
  */
-let dummyHashPromise: Promise<string> | null = null;
-function getDummyHash(): Promise<string> {
-  if (!dummyHashPromise) {
-    dummyHashPromise = hashPassword(randomBytes(SALT_LENGTH).toString("hex"));
+async function verifyUserPassword(
+  password: string,
+  stored: string,
+): Promise<{ valid: boolean; legacy: boolean }> {
+  for (const [index, candidate] of passwordCandidates(password).entries()) {
+    if (await verifyPassword(candidate, stored)) return { valid: true, legacy: index > 0 };
   }
-  return dummyHashPromise;
+  return { valid: false, legacy: false };
 }
+
+/**
+ * Re-hash a password that matched only as typed (a hash from before #2056) from its
+ * normalized form, so the other spelling of it works from now on. Best effort: the
+ * sign-in already succeeded. The update names the hash it verified, so it can never
+ * overwrite a password changed in the meantime.
+ */
+async function upgradeLegacyPasswordHash(
+  request: FastifyRequest,
+  userId: string,
+  verifiedHash: string,
+  password: string,
+): Promise<void> {
+  try {
+    const upgraded = await hashPassword(normalizePassword(password));
+    await db
+      .update(schema.users)
+      .set({ passwordHash: upgraded })
+      .where(and(eq(schema.users.id, userId), eq(schema.users.passwordHash, verifiedHash)));
+  } catch (err) {
+    request.log.warn({ err, userId }, "Could not upgrade a password hash to its normalized form");
+    // request.log has no Sentry bridge, and a fault that persists leaves the other
+    // spelling of this password failing for good, so it has to be seen (#2056).
+    void reportError(err, {
+      source: "http",
+      route: request.routeOptions?.url,
+      method: request.method,
+      subsystem: "password-hash-upgrade",
+    });
+  }
+}
+
+/**
+ * Stand-in hash used to equalize login timing for usernames that don't exist (or
+ * have no local password). Without it, a login attempt for an unknown username
+ * returns as soon as the user lookup misses, while a wrong password for a real user
+ * waits on a full scrypt run. That gap is a timing side-channel an attacker can use
+ * to enumerate valid usernames even though both cases return an identical 401 body.
+ * Running verifyUserPassword against this hash pays the same scrypt cost on the
+ * "unknown user" path so the two cases are timing-indistinguishable.
+ *
+ * It only has to be well formed: a salt and a key of the lengths hashPassword makes,
+ * so verifyPassword runs scrypt and the constant-time compare exactly as it does for
+ * a real hash. Its result is discarded, so it never authenticates anyone. A constant,
+ * not a hash built on first use: built lazily, the first unknown-user login after boot
+ * ran one scrypt computation more than a real user's wrong password (#2254).
+ */
+const DUMMY_HASH = `${"0".repeat(SALT_LENGTH * 2)}:${"0".repeat(KEY_LENGTH * 2)}`;
 
 /**
  * Compute a fast lookup prefix for an API key.
@@ -109,7 +161,9 @@ interface PasswordRuleFailure {
   minLength?: number;
 }
 
-async function validatePasswordStrength(password: string): Promise<PasswordRuleFailure | null> {
+async function validatePasswordStrength(typed: string): Promise<PasswordRuleFailure | null> {
+  // The rules judge the text that will be hashed, not the spelling it was typed in (#2056).
+  const password = normalizePassword(typed);
   // A control character can be saved but never typed back: login refuses NUL
   // outright and browsers strip LF and CR from password inputs (#2055).
   if (/\p{Cc}/u.test(password)) {
@@ -142,7 +196,12 @@ async function validatePasswordStrength(password: string): Promise<PasswordRuleF
   // Characters, not UTF-16 code units: an astral character is two units, so four
   // of them used to meet a minimum of 8 (#2057). Code points are what NIST SP
   // 800-63B counts. It only runs when a password is set, so it locks nobody out.
-  if ([...password].length < minLength)
+  // The count is the smaller of the composed form and the NFKC form: the composed
+  // form so a letter typed as a base plus a combining mark is one character, and
+  // the NFKC form so a compatibility character that expands (U+FDFA becomes 18)
+  // is not credited for the letters it turns into (#2056).
+  const length = Math.min([...typed.normalize("NFC")].length, [...password].length);
+  if (length < minLength)
     broken.push({
       rule: "minLength",
       message: `Password must be at least ${minLength} characters`,
@@ -306,8 +365,18 @@ export async function ensureDefaultAdmin(): Promise<void> {
   const existingUsers = await db.select().from(schema.users);
   if (existingUsers.length > 0) return;
 
+  // Checked here, not in the env schema: an install that already has its admin
+  // never uses this value and must keep booting with a stale one. Browsers strip
+  // LF and CR from password inputs and login refuses NUL, so an admin created
+  // from such a value could never sign in (#2085).
+  if (/\p{Cc}/u.test(env.DEFAULT_PASSWORD)) {
+    throw new Error(
+      "DEFAULT_PASSWORD must not contain control characters (a trailing newline from a quoted compose or .env value is the usual cause)",
+    );
+  }
+
   const id = randomUUID();
-  const passwordHash = await hashPassword(env.DEFAULT_PASSWORD);
+  const passwordHash = await hashPassword(normalizePassword(env.DEFAULT_PASSWORD));
 
   const mustChange = !env.SKIP_MUST_CHANGE_PASSWORD;
   const result = await db
@@ -434,31 +503,19 @@ async function getLoginThrottleConfig(): Promise<LoginThrottleConfig> {
 }
 
 /**
- * Reads a setting and lets a database fault throw. getSettingString answers
- * its default on any error, which for the SSO gate would turn enforcement off
- * during a Postgres blip; the global error handler answers 500 and reports
- * instead, and no session is written (the MFA policy read is fail-closed for
- * the same reason, #815).
- */
-async function readSettingStrict(key: string): Promise<string | undefined> {
-  const [row] = await db
-    .select({ value: schema.settings.value })
-    .from(schema.settings)
-    .where(eq(schema.settings.key, key))
-    .limit(1);
-  return row?.value;
-}
-
-/**
  * True when SSO enforcement is on (and licensed) and `username` is not the
  * break-glass account, so a local password login must not produce a session.
+ * The settings are read strictly: getSettingString would answer "false" on a
+ * database fault and switch enforcement off, so a fault throws instead and the
+ * error handler answers 500 with no session written (the MFA policy read is
+ * fail-closed for the same reason, #815).
  */
 async function isLocalLoginRefusedBySso(username: string): Promise<boolean> {
   // The licence first: it needs no database read, so an unlicensed instance
   // never touches the settings table here.
   if (!(await isEnterpriseFeatureEnabled("sso_enforcement"))) return false;
-  if ((await readSettingStrict("ssoEnforcement")) !== "true") return false;
-  return username !== ((await readSettingStrict("ssoBreakGlassUsername")) ?? "");
+  if ((await getSettingStrict("ssoEnforcement")) !== "true") return false;
+  return username !== ((await getSettingStrict("ssoBreakGlassUsername")) ?? "");
 }
 
 // ── Auth routes ────────────────────────────────────────────────────
@@ -534,7 +591,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       if (ssoRefused || !user?.passwordHash) {
         // Pay the same scrypt cost a real password check would take, so
         // response timing doesn't reveal whether the username exists.
-        await verifyPassword(body.password, await getDummyHash());
+        await verifyUserPassword(body.password, DUMMY_HASH);
         authAttempts.inc({ method: "password", result: "failure" });
         void trackEvent(ANALYTICS_EVENTS.AUTH_LOGIN_FAILED, { method: "password" });
         await audit("LOGIN_FAILED", {
@@ -553,7 +610,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         return reply.status(401).send({ error: "Invalid credentials" });
       }
 
-      const valid = await verifyPassword(body.password, user.passwordHash);
+      const { valid, legacy } = await verifyUserPassword(body.password, user.passwordHash);
       if (!valid) {
         authAttempts.inc({ method: "password", result: "failure" });
         void trackEvent(ANALYTICS_EVENTS.AUTH_LOGIN_FAILED, { method: "password" });
@@ -581,6 +638,11 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
           reason: "disabled_user",
         });
         return reply.status(403).send({ error: "User is disabled", code: "USER_DISABLED" });
+      }
+
+      // Before the MFA branch, which never sees the password again.
+      if (legacy) {
+        await upgradeLegacyPasswordHash(request, user.id, user.passwordHash, body.password);
       }
 
       // Two failures used to share one silent catch here and they want
@@ -926,20 +988,36 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         });
       }
 
-      const valid = await verifyPassword(body.currentPassword, user.passwordHash);
+      const { valid } = await verifyUserPassword(body.currentPassword, user.passwordHash);
       if (!valid) {
         return reply
           .status(401)
           .send({ error: "Current password is incorrect", code: "INVALID_PASSWORD" });
       }
 
-      const newHash = await hashPassword(body.newPassword);
+      const newHash = await hashPassword(normalizePassword(body.newPassword));
 
       // One transaction: if a revoke fails the old password stays in place, so
       // the user is told the change failed and a retry with the old password
       // works, instead of a new password beside surviving sessions and keys (#2089).
       const currentToken = extractToken(request);
-      await db.transaction(async (tx) => {
+      const outcome = await db.transaction(async (tx) => {
+        // Lock the row and check the password is still the one just verified.
+        // Two requests that both proved the old password otherwise both
+        // write, and the first caller is told a change succeeded that the
+        // second one overwrote (#2127). The lock also orders the revokes below
+        // after any concurrent change has committed. NO KEY UPDATE, not
+        // UPDATE: it still excludes every other writer of this row, but
+        // doesn't hold up inserts that only reference it (sessions, keys,
+        // audit rows).
+        const [locked] = await tx
+          .select({ passwordHash: schema.users.passwordHash })
+          .from(schema.users)
+          .where(eq(schema.users.id, authUser.id))
+          .for("no key update");
+        if (!locked) return "gone" as const;
+        if (locked.passwordHash !== user.passwordHash) return "changed" as const;
+
         await tx
           .update(schema.users)
           .set({ passwordHash: newHash, mustChangePassword: false, updatedAt: new Date() })
@@ -956,7 +1034,21 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
 
         // Revoke all API keys - if credentials were compromised, keys must be rotated too
         await tx.delete(schema.apiKeys).where(eq(schema.apiKeys.userId, authUser.id));
+        return "changed-here" as const;
       });
+
+      if (outcome === "gone") {
+        return reply.status(404).send({ error: "User not found", code: "NOT_FOUND" });
+      }
+      if (outcome === "changed") {
+        // Another change won: the user's own in another tab, an admin reset,
+        // or a SCIM deprovision. Nothing was written here.
+        request.log.info({ userId: authUser.id }, "Password change lost to a concurrent change");
+        return reply.status(409).send({
+          error: "Your password was changed elsewhere. Sign in again.",
+          code: "PASSWORD_CHANGED",
+        });
+      }
 
       await auditFromRequest(request)("PASSWORD_CHANGED", {
         userId: authUser.id,
@@ -1101,7 +1193,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     const id = randomUUID();
     // Hash before the transaction: scrypt takes ~100ms and must not extend
     // the user-limit lock window.
-    const passwordHash = await hashPassword(body.password);
+    const passwordHash = await hashPassword(normalizePassword(body.password));
 
     // The duplicate pre-check above can't close the username race (issue
     // #900), and a plain count check can't close the limit race: two
@@ -1242,11 +1334,18 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         updates.team = found.id;
       }
 
-      await db.update(schema.users).set(updates).where(eq(schema.users.id, id));
-
-      // Invalidate all sessions when role changes to force re-login with new permissions
-      if (updates.role && updates.role !== user.role) {
-        await db.delete(schema.sessions).where(eq(schema.sessions.userId, id));
+      // One transaction: a role change whose session revoke failed would leave
+      // the new role in place while the old sessions keep the old permissions
+      // (#2126).
+      const roleChanged = Boolean(updates.role && updates.role !== user.role);
+      await db.transaction(async (tx) => {
+        await tx.update(schema.users).set(updates).where(eq(schema.users.id, id));
+        // Invalidate all sessions when role changes to force re-login with new permissions
+        if (roleChanged) {
+          await tx.delete(schema.sessions).where(eq(schema.sessions.userId, id));
+        }
+      });
+      if (roleChanged) {
         request.log.info(
           { targetUserId: id, oldRole: user.role, newRole: updates.role },
           "Sessions invalidated due to role change",
@@ -1305,7 +1404,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         });
       }
 
-      const newHash = await hashPassword(body.newPassword);
+      const newHash = await hashPassword(normalizePassword(body.newPassword));
 
       // One transaction, for the same reason as change-password (#2089).
       await db.transaction(async (tx) => {

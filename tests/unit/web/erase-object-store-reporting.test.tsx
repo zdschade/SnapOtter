@@ -82,10 +82,19 @@ class FakeXhr {
     this.uploadHandlerAtSend = this.upload.onprogress !== null;
   }
 
+  /** The browser finished sending the body; the server hasn't answered yet. */
+  uploadFinished() {
+    act(() => {
+      (this.upload.onload as (() => void) | null)?.();
+    });
+  }
+
   /** Report upload bytes moving, as the browser does while the body is sent. */
   uploadProgress(loaded: number, total: number) {
     act(() => {
-      this.upload.onprogress?.(new ProgressEvent("progress", { loaded, total }));
+      this.upload.onprogress?.(
+        new ProgressEvent("progress", { loaded, total, lengthComputable: true }),
+      );
     });
   }
 
@@ -1423,15 +1432,89 @@ describe("erase-object batch: leaving the page mid-batch (#1894)", () => {
     expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
   });
 
-  it("sends no cancel for a file the server never answered (#2093)", async () => {
+  it("aborts a file still uploading and sends no cancel (#2093)", async () => {
     const { unmount } = renderPanel(3);
-    await submit(1);
+    const first = await submit(1);
 
     unmount();
     moveToAnotherTool();
     await act(async () => {});
 
+    expect(first.aborted).toBe(true);
     expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+  });
+
+  // The browser has sent the whole body and the server hasn't answered: it may be
+  // reading or decoding it, and will enqueue. Aborting would leave that job running with nothing to cancel
+  // it by, so the request stays open and the cancel goes out on the 202 (#2136).
+  it("keeps the request after the upload finished and cancels when the 202 arrives (#2136)", async () => {
+    const { unmount } = renderPanel(3);
+    const first = await submit(1);
+    first.uploadFinished();
+
+    unmount();
+    moveToAnotherTool();
+    await act(async () => {});
+
+    expect(first.aborted).toBe(false);
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+
+    first.respond(202, { jobId: "queued", async: true });
+    const clientJobId = first.body?.get("clientJobId");
+    await waitFor(() =>
+      expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+        `/api/v1/jobs/${clientJobId}/cancel`,
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+    // The stopped batch stays stopped: nothing else goes out, nothing lands.
+    expect(FakeXhr.instances).toHaveLength(1);
+    expect(entry(0).processedUrl).toBeNull();
+  });
+
+  // Firefox fires upload.onload only once the answer starts, so the last upload
+  // progress event is all the batch has to go on.
+  it("treats the final upload progress event as the upload being done (#2136)", async () => {
+    const { unmount } = renderPanel(3);
+    const first = await submit(1);
+    first.uploadProgress(100, 100);
+
+    unmount();
+    moveToAnotherTool();
+    await act(async () => {});
+
+    expect(first.aborted).toBe(false);
+    first.respond(202, { jobId: "queued", async: true });
+    await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1));
+  });
+
+  it("aborts when the upload progress shows the body is only partly sent (#2136)", async () => {
+    const { unmount } = renderPanel(3);
+    const first = await submit(1);
+    first.uploadProgress(40, 100);
+
+    unmount();
+    moveToAnotherTool();
+    await act(async () => {});
+
+    expect(first.aborted).toBe(true);
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+  });
+
+  it("sends no cancel when the answer to a stopped, uploaded file is not a 202 (#2136)", async () => {
+    const { unmount } = renderPanel(3);
+    const first = await submit(1);
+    first.uploadFinished();
+
+    unmount();
+    moveToAnotherTool();
+    first.respond(200, GOOD_BODY);
+    await act(async () => {});
+
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+    expect(entry(0).processedUrl).toBeNull();
+    expect(useFileStore.getState().processing).toBe(false);
   });
 
   it("stops at the file in flight when the files go after one has finished", async () => {
@@ -1613,14 +1696,65 @@ describe("erase-object single file: leaving the page mid-run (#1975)", () => {
     expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
   });
 
-  it("sends no cancel when the files go before the server has answered (#2093)", async () => {
+  it("aborts a file still uploading and sends no cancel (#2093)", async () => {
     renderPanel();
-    await submit();
+    const xhr = await submit();
 
     moveToAnotherTool();
     await act(async () => {});
 
+    expect(xhr.aborted).toBe(true);
     expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+  });
+
+  it("keeps the request after the upload finished and cancels when the 202 arrives (#2136)", async () => {
+    renderPanel();
+    const xhr = await submit();
+    xhr.uploadFinished();
+
+    moveToAnotherTool();
+    await act(async () => {});
+
+    expect(xhr.aborted).toBe(false);
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+    // The run is over for the user: processing is false and nothing is pending.
+    expect(useFileStore.getState().processing).toBe(false);
+
+    xhr.respond(202, { jobId: "job-1", async: true });
+    const clientJobId = xhr.body?.get("clientJobId");
+    await waitFor(() =>
+      expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+        `/api/v1/jobs/${clientJobId}/cancel`,
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats the final upload progress event as the upload being done (#2136)", async () => {
+    renderPanel();
+    const xhr = await submit();
+    xhr.uploadProgress(100, 100);
+
+    moveToAnotherTool();
+    await act(async () => {});
+
+    expect(xhr.aborted).toBe(false);
+    xhr.respond(202, { jobId: "job-1", async: true });
+    await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1));
+  });
+
+  it("sends no cancel when the answer to a stopped, uploaded file is not a 202 (#2136)", async () => {
+    renderPanel();
+    const xhr = await submit();
+    xhr.uploadFinished();
+
+    moveToAnotherTool();
+    xhr.respond(200, GOOD_BODY);
+    await act(async () => {});
+
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+    expect(entry(0).processedUrl).toBeNull();
   });
 
   it("replacing the files from the library ends the run and clears processing", async () => {

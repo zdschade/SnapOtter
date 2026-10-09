@@ -12273,7 +12273,7 @@ paths:
       operationId: chartMaker
       tags: [Tools]
       summary: Chart Maker
-      description: Create bar, line, or pie charts from CSV or JSON data. Returns a PNG image.
+      description: Create bar, line, or pie charts from CSV or JSON data. Returns a PNG image. When rows were left out because their value cell held text that isn't a number, the response adds `chartRows` ({charted, skipped}); blank rows aren't counted.
       security:
         - bearerAuth: []
       requestBody:

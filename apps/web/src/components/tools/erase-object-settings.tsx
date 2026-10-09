@@ -288,6 +288,13 @@ export function EraseObjectSettings({
       // Set once the server has answered 202: from then on a job exists for
       // this file, and dropping the file has to cancel it (#2093).
       let accepted = false;
+      // The browser finished sending the body (the last progress event or
+      // upload.onload, whichever it fires first). A stop in the
+      // window after that and before the 202 can't abort: the server may still be
+      // validating and decoding, and will enqueue a job nothing could cancel. The
+      // request stays open and the cancel goes out when the 202 arrives (#2136).
+      let uploadDone = false;
+      let cancelOnAnswer = false;
       const abandon = (err: Error) => {
         abandoned = true;
         xhr.abort();
@@ -312,8 +319,15 @@ export function EraseObjectSettings({
       // the batch has already decided to write nothing more for it.
       onStoppable(() => {
         // First, so a teardown step that throws can't leave the job running.
+        const keepRequest = uploadDone && !accepted;
+        if (keepRequest) cancelOnAnswer = true;
         if (accepted) void cancelAbandonedJob(clientJobId, "erase-object");
         stopProgress();
+        if (keepRequest) {
+          abandoned = true;
+          reject(new Error("Erase Object batch stopped"));
+          return;
+        }
         abandon(new Error("Erase Object batch stopped"));
       });
 
@@ -330,9 +344,20 @@ export function EraseObjectSettings({
       // The stall timer is armed before the upload starts, and on a quiet
       // stream only this keeps it from cutting off an image that is still
       // uploading (#1959). xhr.timeout still bounds the request as a whole.
-      xhr.upload.onprogress = () => subscription.touch();
+      xhr.upload.onprogress = (e) => {
+        subscription.touch();
+        // Firefox fires upload.onload only once the answer starts, so the last
+        // progress event is the only signal there that the body is with the server.
+        if (e.lengthComputable && e.loaded >= e.total) uploadDone = true;
+      };
+      xhr.upload.onload = () => {
+        uploadDone = true;
+      };
       xhr.onload = () => {
-        if (xhr.status === 202) accepted = true;
+        if (xhr.status === 202) {
+          accepted = true;
+          if (cancelOnAnswer) void cancelAbandonedJob(clientJobId, "erase-object");
+        }
         if (abandoned || xhr.status === 202) return;
         stopProgress();
         if (xhr.status >= 200 && xhr.status < 300) {
@@ -470,9 +495,21 @@ export function EraseObjectSettings({
     // See the batch path: once the server has answered 202 a job exists, and
     // a library run's job would still save over or beside the original (#2093).
     let accepted = false;
+    // See the batch path: a file dropped after the upload finished and before the
+    // 202 keeps its request open, and the cancel goes out when the 202 arrives (#2136).
+    let uploadDone = false;
+    let cancelOnAnswer = false;
     const abandonRequest = () => {
       abandoned = true;
       xhr.abort();
+    };
+    const dropRequest = () => {
+      if (uploadDone && !accepted) {
+        abandoned = true;
+        cancelOnAnswer = true;
+        return;
+      }
+      abandonRequest();
     };
 
     const subscription = subscribeEraseObjectJobProgress(clientJobId, {
@@ -525,7 +562,7 @@ export function EraseObjectSettings({
       // processing. The first error is reported once.
       let stopError: { cause: unknown } | null = null;
       for (const step of [
-        abandonRequest,
+        dropRequest,
         () => {
           if (accepted) void cancelAbandonedJob(clientJobId, "erase-object");
         },
@@ -571,16 +608,26 @@ export function EraseObjectSettings({
       // cutting the upload off (#1959).
       subscription.touch();
       if (e.lengthComputable) {
-        setProgressPercent((e.loaded / e.total) * 15);
+        // Firefox fires upload.onload only once the answer starts, so the last
+        // progress event is the only signal there that the body is with the server.
+        if (e.loaded >= e.total) uploadDone = true;
+        if (!abandoned) setProgressPercent((e.loaded / e.total) * 15);
       }
     };
     xhr.upload.onload = () => {
+      uploadDone = true;
+      // Firefox fires this after a stop, once the answer starts: the run is over,
+      // and a new one may be on the panel by now.
+      if (abandoned) return;
       setProgressPhase("processing");
       setProgressPercent(15);
     };
     xhr.onload = () => {
       // 202 = async: the progress subscription drives completion via SSE.
-      if (xhr.status === 202) accepted = true;
+      if (xhr.status === 202) {
+        accepted = true;
+        if (cancelOnAnswer) void cancelAbandonedJob(clientJobId, "erase-object");
+      }
       if (abandoned || xhr.status === 202) return;
 
       endWatch();

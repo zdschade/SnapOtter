@@ -3358,6 +3358,8 @@ export const de: TranslationKeys = {
       kindBar: "Balken",
       kindLine: "Linie",
       kindPie: "Kreis",
+      rowsSkipped:
+        "Dargestellte Zeilen: {charted}. Übersprungen, weil die Wertespalte keine Zahl enthielt: {skipped}.",
     },
     "enhance-faces-standalone": {
       model: "Modell",

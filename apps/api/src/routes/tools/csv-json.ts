@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import Papa from "papaparse";
 import { z } from "zod";
+import { csvParseFailure, parseCsvWithHeader } from "../../lib/csv-parse.js";
 import { InputValidationError } from "../../modality/contract.js";
 import { createToolRoute } from "../tool-factory.js";
 
@@ -98,12 +99,10 @@ export function registerCsvJson(app: FastifyInstance) {
         };
       }
 
-      const parsed = Papa.parse<Record<string, unknown>>(input.buffer.toString("utf8"), {
-        header: true,
-        skipEmptyLines: true,
-      });
-      if (parsed.errors.length > 0) {
-        throw new InputValidationError(`CSV parse failed: ${parsed.errors[0].message}`);
+      const parsed = parseCsvWithHeader(input.buffer.toString("utf8"));
+      const parseFailure = csvParseFailure(parsed);
+      if (parseFailure) {
+        throw new InputValidationError(`CSV parse failed: ${parseFailure}`);
       }
       const json = JSON.stringify(parsed.data, null, settings.pretty ? 2 : 0);
       return {

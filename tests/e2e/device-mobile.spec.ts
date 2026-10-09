@@ -7,7 +7,28 @@
  *
  * All tests are tagged @mobile so the device projects' grep filter picks them up.
  */
+import path from "node:path";
 import { expect, test, uploadTestImage, waitForProcessing } from "./helpers";
+
+// Six Letter pages: enough thumbnails to be taller than a phone's preview area.
+const ORGANIZE_PDF_FIXTURE = path.join(
+  process.cwd(),
+  "tests",
+  "fixtures",
+  "document",
+  "valid",
+  "multipage-6.pdf",
+);
+
+// A5 pages (419 x 595 pt): drawn at the old fixed 1.5x they are 629 x 893 px.
+const SIGN_PDF_FIXTURE = path.join(
+  process.cwd(),
+  "tests",
+  "fixtures",
+  "document",
+  "valid",
+  "test-3page.pdf",
+);
 
 // ---------------------------------------------------------------------------
 // Core flow: load -> navigate -> upload -> process -> download
@@ -126,6 +147,191 @@ test.describe("@mobile A result taller than the preview area", () => {
       .locator("#main-content")
       .getByRole("button", { name: "Settings", exact: true })
       .click({ trial: true, timeout: 5_000 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #2190: the Sign PDF page was drawn at a fixed 1.5x, wider and taller than the
+// preview area on a phone. It covered the "Process" peek bar and the Settings
+// button, and the part left of the viewport couldn't be scrolled to, so a phone
+// user could neither place a signature nor reach the download.
+// ---------------------------------------------------------------------------
+test.describe("@mobile Sign PDF on a phone", () => {
+  test.use({ viewport: { width: 390, height: 664 } });
+
+  test("fits the page in the preview and leaves the settings controls tappable", async ({
+    loggedInPage: page,
+  }) => {
+    await page.goto("/pdf/sign-pdf");
+    const chooser = page.waitForEvent("filechooser");
+    await page
+      .getByRole("button", { name: /upload from computer/i })
+      .first()
+      .click();
+    await (await chooser).setFiles(SIGN_PDF_FIXTURE);
+
+    const canvas = page.getByTestId("sign-pdf-canvas");
+    await expect(canvas).toBeVisible({ timeout: 15_000 });
+    // Wait for pdf.js to size the page: the canvas is 300x150 until it renders.
+    await expect
+      .poll(async () => (await canvas.boundingBox())?.height ?? 0, { timeout: 15_000 })
+      .toBeGreaterThan(160);
+
+    // The page is as wide as the area, not the old fixed 1.5x (629px for this A5 page).
+    const box = await canvas.boundingBox();
+    expect(box?.width ?? Infinity).toBeLessThanOrEqual(390);
+
+    // A trial click does the actionability checks, including "nothing else
+    // receives the pointer event", without tapping.
+    await page
+      .getByRole("button", { name: "Process", exact: true })
+      .click({ trial: true, timeout: 5_000 });
+    await page
+      .locator("#main-content")
+      .getByRole("button", { name: "Settings", exact: true })
+      .click({ trial: true, timeout: 5_000 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #2191: the Organize PDF grid grew to fit its pages instead of scrolling inside
+// the preview area. With four or more pages it covered the "Process" peek bar and
+// the Settings button, so the sheet could not be opened to run the tool at all,
+// and the "Reset order" toolbar scrolled out of reach above the viewport.
+// ---------------------------------------------------------------------------
+test.describe("@mobile Organize PDF on a phone", () => {
+  test.use({ viewport: { width: 390, height: 664 } });
+
+  test("scrolls its page grid inside the preview and leaves the settings controls tappable", async ({
+    loggedInPage: page,
+  }) => {
+    await page.goto("/pdf/organize-pdf");
+    const chooser = page.waitForEvent("filechooser");
+    await page
+      .getByRole("button", { name: /upload from computer/i })
+      .first()
+      .click();
+    await (await chooser).setFiles(ORGANIZE_PDF_FIXTURE);
+
+    // Six Letter pages: the grid is taller than the preview area.
+    const reset = page.getByTestId("organize-reset");
+    await expect(reset).toBeVisible({ timeout: 15_000 });
+    const lastPage = page.getByRole("button", { name: /page 6/i }).first();
+    await expect(lastPage).toBeAttached();
+
+    // The toolbar stays inside the viewport instead of scrolling away above it.
+    const box = await reset.boundingBox();
+    expect(box?.y ?? -1).toBeGreaterThanOrEqual(0);
+
+    // The grid scrolls inside the preview: the last page can be brought into view
+    // and ends above the peek bar, not under it.
+    await lastPage.scrollIntoViewIfNeeded();
+    const lastBox = await lastPage.boundingBox();
+    const peekBox = await page.getByRole("button", { name: "Process", exact: true }).boundingBox();
+    expect((lastBox?.y ?? Infinity) + (lastBox?.height ?? 0)).toBeLessThanOrEqual(
+      (peekBox?.y ?? 0) + 1,
+    );
+
+    // A trial click does the actionability checks, including "nothing else
+    // receives the pointer event", without tapping.
+    await page
+      .getByRole("button", { name: "Process", exact: true })
+      .click({ trial: true, timeout: 5_000 });
+    await page
+      .locator("#main-content")
+      .getByRole("button", { name: "Settings", exact: true })
+      .click({ trial: true, timeout: 5_000 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #2192: more phone views were taller than the preview area and covered the
+// "Process" peek bar or the Settings button. The bars now stack above the preview
+// content, and the views that overflowed are bounded.
+// ---------------------------------------------------------------------------
+test.describe("@mobile Small phones keep the settings controls tappable", () => {
+  async function expectControlsTappable(page: import("@playwright/test").Page) {
+    // A trial click does the actionability checks, including "nothing else
+    // receives the pointer event", without tapping.
+    await page
+      .getByRole("button", { name: "Process", exact: true })
+      .click({ trial: true, timeout: 5_000 });
+    await page
+      .locator("#main-content")
+      .getByRole("button", { name: "Settings", exact: true })
+      .click({ trial: true, timeout: 5_000 });
+  }
+
+  // The bars stack above the preview, so a view that still spills under one passes
+  // the trial clicks. These check that the view itself stays between the bars.
+  async function headerBottom(page: import("@playwright/test").Page) {
+    const header = await page.locator("#main-content h1").locator("xpath=..").boundingBox();
+    return (header?.y ?? 0) + (header?.height ?? 0);
+  }
+
+  test.describe("QR code preview", () => {
+    test.use({ viewport: { width: 360, height: 560 } });
+
+    test("an empty QR preview does not cover the peek bar", async ({ loggedInPage: page }) => {
+      await page.goto("/image/qr-generate");
+      await expect(page.getByTestId("qr-preview")).toBeVisible({ timeout: 15_000 });
+
+      await expectControlsTappable(page);
+      const preview = await page.getByTestId("qr-preview").boundingBox();
+      expect((preview?.y ?? -1) + 1).toBeGreaterThanOrEqual(await headerBottom(page));
+      // Nothing is cut off sideways: the code fits its scroll box without scrolling.
+      const overflowX = await page.getByTestId("qr-preview").evaluate((el) => {
+        const scroller = el.closest(".overflow-auto") as HTMLElement | null;
+        return scroller ? scroller.scrollWidth - scroller.clientWidth : -1;
+      });
+      expect(overflowX).toBe(0);
+    });
+  });
+
+  test.describe("a failed run", () => {
+    test.use({ viewport: { width: 320, height: 480 } });
+
+    test("the failed-file card does not cover the controls", async ({ loggedInPage: page }) => {
+      await page.route("**/api/v1/tools/image/resize", (route) =>
+        route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({
+            error:
+              "Processing failed because the server could not decode this image. It may be corrupt, truncated, or in a format the converter does not support. Try a different file, a smaller size, or export it again from the program that made it.",
+          }),
+        }),
+      );
+      await page.goto("/image/resize");
+      await uploadTestImage(page);
+      await page.getByRole("button", { name: "Process", exact: true }).click();
+      await page.getByRole("spinbutton", { name: /width/i }).fill("50");
+      await page
+        .getByRole("button", { name: /^resize$/i })
+        .last()
+        .click();
+      await expect(page.getByText(/could not decode this image/i).first()).toBeVisible({
+        timeout: 15_000,
+      });
+      await page.getByRole("dialog").getByRole("button", { name: /close/i }).click();
+      await expect(page.locator("[role='dialog']")).toBeHidden();
+
+      await expectControlsTappable(page);
+      // The card starts below the header and its last button can be scrolled to
+      // above the peek bar, instead of being clipped or covered.
+      const message = await page
+        .getByText(/could not decode this image/i)
+        .first()
+        .boundingBox();
+      expect((message?.y ?? -1) + 1).toBeGreaterThanOrEqual(await headerBottom(page));
+      const lastButton = page
+        .getByRole("button", { name: /report an issue|report issue/i })
+        .first();
+      await lastButton.scrollIntoViewIfNeeded();
+      const last = await lastButton.boundingBox();
+      const peek = await page.getByRole("button", { name: "Process", exact: true }).boundingBox();
+      expect((last?.y ?? Infinity) + (last?.height ?? 0)).toBeLessThanOrEqual((peek?.y ?? 0) + 1);
+    });
   });
 });
 

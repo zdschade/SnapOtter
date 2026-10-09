@@ -3278,6 +3278,8 @@ export const en = {
       kindBar: "Bar",
       kindLine: "Line",
       kindPie: "Pie",
+      rowsSkipped:
+        "Rows charted: {charted}. Skipped because the value column had no number: {skipped}.",
     },
     "enhance-faces-standalone": {
       model: "Model",

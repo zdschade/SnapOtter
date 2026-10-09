@@ -46,7 +46,6 @@ import { requestDuration } from "./lib/metrics.js";
 import { purgeOcrRuntimeDownloads, runOcrRuntimeMaintenance } from "./lib/ocr-runtime-install.js";
 import { posthogProxyEnabled } from "./lib/posthog-proxy.js";
 import { redactUrl } from "./lib/redact-url.js";
-import { getSettingString } from "./lib/settings-helpers.js";
 import { assertStorageWritable } from "./lib/storage-writable.js";
 import { gatherSystemProperties } from "./lib/system-info.js";
 import { parseTrustProxy } from "./lib/trust-proxy.js";
@@ -68,6 +67,7 @@ import { registerPostHogProxy } from "./plugins/posthog-proxy.js";
 import { registerSaml } from "./plugins/saml.js";
 import { registerStatic } from "./plugins/static.js";
 import { toolAccessMiddleware } from "./plugins/tool-access.js";
+import { skipUnmatchedRequestBodies } from "./plugins/unmatched-body.js";
 import { registerUpload } from "./plugins/upload.js";
 import { adminOpsRoutes } from "./routes/admin-ops.js";
 import { analyticsRoutes } from "./routes/analytics.js";
@@ -389,6 +389,9 @@ app.addContentTypeParser("application/json", { parseAs: "string" }, (_request, b
   }
 });
 
+// A path with no route has nothing to parse; don't buffer its body before the 404 (#2123).
+skipUnmatchedRequestBodies(app);
+
 registerErrorHandler(app);
 
 // Plugins
@@ -664,32 +667,6 @@ app.get("/api/v1/admin/health", async (request, reply) => {
       ? { active: true, org: enterpriseLicense.org, plan: enterpriseLicense.plan }
       : { active: false },
   };
-});
-
-// Public config endpoint (for frontend to know if auth is required)
-app.get("/api/v1/config/auth", async () => {
-  const config: Record<string, unknown> = {
-    authEnabled: env.AUTH_ENABLED,
-  };
-  if (env.OIDC_ENABLED) {
-    config.oidcEnabled = true;
-    config.oidcProviderName = env.OIDC_PROVIDER_NAME || null;
-    config.oidcLoginUrl = "/api/auth/oidc/login";
-  }
-
-  // SAML SSO requires both env flag and enterprise license
-  const samlLicensed = env.SAML_ENABLED
-    ? await isEnterpriseFeatureEnabled("saml_sso", "boot")
-    : false;
-  if (env.SAML_ENABLED && samlLicensed) {
-    config.samlEnabled = true;
-    config.samlProviderName = env.SAML_PROVIDER_NAME || "SSO";
-    config.samlLoginUrl = "/api/auth/saml/login";
-  }
-
-  config.ssoEnforced = (await getSettingString("ssoEnforcement", "false")) === "true";
-
-  return config;
 });
 
 // Readiness probe (no auth -- used by load balancers / k8s)

@@ -21,6 +21,10 @@ export function pickResultNotes(source: unknown): ResultNotes | null {
   if (skipped === "failed" || skipped === "unavailable" || skipped === "animated") {
     notes.deepEnhanceSkipped = skipped;
   }
+  const rows = raw.chartRows as { charted?: unknown; skipped?: unknown } | undefined;
+  if (rows && typeof rows.charted === "number" && typeof rows.skipped === "number") {
+    notes.chartRows = { charted: rows.charted, skipped: rows.skipped };
+  }
   return Object.keys(notes).length > 0 ? notes : null;
 }
 

@@ -16,7 +16,7 @@ import { ocrOneFile } from "@/components/tools/ocr-settings";
 interface MockXhr {
   status: number;
   responseText: string;
-  upload: { onprogress?: (event: ProgressEvent) => void };
+  upload: { onprogress?: (event: unknown) => void; onload?: () => void };
   onload?: () => void;
   onerror?: () => void;
   open: ReturnType<typeof vi.fn>;
@@ -312,12 +312,85 @@ describe("OCR stopping a file (#2093)", () => {
     );
   });
 
-  it("sends no cancel before the server has answered", async () => {
+  it("aborts a file still uploading and sends no cancel", async () => {
     const { promise, stop } = stoppableRun();
 
     stop();
 
     await expect(promise).rejects.toThrow("OCR scan stopped");
+    expect(xhrs[0].abort).toHaveBeenCalled();
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+  });
+
+  // The browser has sent the whole body and the server hasn't answered: it may be validating and
+  // decoding, and will still enqueue. Aborting would leave that job running with
+  // no way to cancel it, so the request stays open and the cancel goes out when
+  // the 202 proves a job exists (#2136).
+  it("keeps the request after the upload finished and cancels when the 202 arrives", async () => {
+    const { promise, stop } = stoppableRun();
+    const xhr = xhrs[0];
+    xhr.upload.onload?.();
+
+    stop();
+
+    await expect(promise).rejects.toThrow("OCR scan stopped");
+    expect(xhr.abort).not.toHaveBeenCalled();
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+
+    xhr.status = 202;
+    xhr.responseText = JSON.stringify({ jobId: "job-1", status: "queued" });
+    xhr.onload?.();
+
+    await vi.waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      CANCEL_URL,
+      expect.objectContaining({ method: "POST" }),
+    );
+    // The stopped scan stays stopped: no stream is reopened, no timer armed.
+    expect(MockEventSource.instances[0].close).toHaveBeenCalled();
+  });
+
+  // Firefox fires upload.onload only once the answer starts, so the last upload
+  // progress event is all the scan has to go on.
+  it("treats the final upload progress event as the upload being done", async () => {
+    const { promise, stop } = stoppableRun();
+    const xhr = xhrs[0];
+    xhr.upload.onprogress?.({ lengthComputable: true, loaded: 10, total: 10 });
+
+    stop();
+    await expect(promise).rejects.toThrow("OCR scan stopped");
+    expect(xhr.abort).not.toHaveBeenCalled();
+
+    xhr.status = 202;
+    xhr.responseText = JSON.stringify({ jobId: "job-1", status: "queued" });
+    xhr.onload?.();
+    await vi.waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1));
+  });
+
+  it("aborts when the upload progress shows the body is only partly sent", async () => {
+    const { promise, stop } = stoppableRun();
+    const xhr = xhrs[0];
+    xhr.upload.onprogress?.({ lengthComputable: true, loaded: 4, total: 10 });
+
+    stop();
+    await expect(promise).rejects.toThrow("OCR scan stopped");
+
+    expect(xhr.abort).toHaveBeenCalled();
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+  });
+
+  it("sends no cancel when the answer to a stopped, uploaded file is not a 202", async () => {
+    const { promise, stop } = stoppableRun();
+    const xhr = xhrs[0];
+    xhr.upload.onload?.();
+
+    stop();
+    await expect(promise).rejects.toThrow("OCR scan stopped");
+
+    xhr.status = 200;
+    xhr.responseText = JSON.stringify({ text: "done" });
+    xhr.onload?.();
+
     expect(vi.mocked(fetch)).not.toHaveBeenCalled();
   });
 

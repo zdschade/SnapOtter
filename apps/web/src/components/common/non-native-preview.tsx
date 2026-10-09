@@ -182,8 +182,8 @@ export function NonNativePreview({
   // Idle state: file info + generate button
   if (state === "idle") {
     return (
-      <div className="flex-1 flex items-center justify-center">
-        <div className="text-center p-8 max-w-xs">
+      <div className="flex min-h-0 max-h-full flex-1 overflow-auto">
+        <div className="m-auto text-center p-8 max-w-xs">
           <div className="mx-auto w-16 h-16 rounded-2xl bg-muted flex items-center justify-center mb-4">
             <IconComponent className="h-8 w-8 text-muted-foreground" />
           </div>
@@ -209,8 +209,8 @@ export function NonNativePreview({
   if (state === "generating") {
     const previewMessages = t.toolPage.previewProgressMessages;
     return (
-      <div className="flex-1 flex items-center justify-center">
-        <div className="text-center p-8 max-w-xs w-full">
+      <div className="flex min-h-0 max-h-full flex-1 overflow-auto">
+        <div className="m-auto text-center p-8 max-w-xs w-full">
           <div className="mx-auto w-16 h-16 rounded-2xl bg-muted flex items-center justify-center mb-4">
             <IconComponent className="h-8 w-8 text-muted-foreground" />
           </div>
@@ -238,8 +238,8 @@ export function NonNativePreview({
   // Error state: retry button
   if (state === "error") {
     return (
-      <div className="flex-1 flex items-center justify-center">
-        <div className="text-center p-8 max-w-xs">
+      <div className="flex min-h-0 max-h-full flex-1 overflow-auto">
+        <div className="m-auto text-center p-8 max-w-xs">
           <div className="mx-auto w-16 h-16 rounded-2xl bg-muted flex items-center justify-center mb-4">
             <IconComponent className="h-8 w-8 text-muted-foreground" />
           </div>
@@ -286,7 +286,9 @@ export function NonNativePreview({
       );
     }
     return (
-      <div className="flex-1 flex items-center justify-center p-2">
+      // h-full, not flex-1: the video's max-h-full needs a definite height to cap
+      // against, or a portrait video overflows the preview area (#2192).
+      <div className="flex h-full w-full min-h-0 min-w-0 items-center justify-center p-2">
         {/* biome-ignore lint/a11y/useMediaCaption: preview video player */}
         <video controls className="max-h-full max-w-full rounded-md" src={previewUrl} />
       </div>

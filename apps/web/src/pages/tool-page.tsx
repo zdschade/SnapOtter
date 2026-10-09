@@ -765,13 +765,20 @@ export function ToolPage() {
             <Suspense
               fallback={<div className="text-sm text-muted-foreground">{t.common.loading}</div>}
             >
-              <WaveformPlayer
-                src={audioSrc}
-                // audioSrc falls back to the original, and only a result claims.
-                onDownload={playerDownloadClaim(processedUrl, () =>
-                  useFileStore.getState().claimSelected(),
-                )}
-              />
+              {/* Scrolls inside the image area when the player doesn't fit (a phone
+                  in landscape), centred only while it does, so its play button
+                  never ends up under the z-20 bars (#2192). */}
+              <div className="flex min-h-0 max-h-full w-full overflow-auto">
+                <div className="m-auto w-full">
+                  <WaveformPlayer
+                    src={audioSrc}
+                    // audioSrc falls back to the original, and only a result claims.
+                    onDownload={playerDownloadClaim(processedUrl, () =>
+                      useFileStore.getState().claimSelected(),
+                    )}
+                  />
+                </div>
+              </div>
             </Suspense>
           );
         }
@@ -859,8 +866,10 @@ export function ToolPage() {
       displayMode !== "interactive-sign"
     ) {
       return (
-        <div className="flex-1 flex items-center justify-center p-6">
-          <div className="text-center max-w-sm">
+        // Bounded by the image area and scrolling inside it; m-auto centres the card
+        // only while it fits, so a tall one is never clipped at its top (#2192).
+        <div className="flex min-h-0 max-h-full flex-1 overflow-auto p-6">
+          <div className="m-auto text-center max-w-sm">
             <AlertCircle className="mx-auto h-10 w-10 text-destructive mb-3" />
             <p className="font-medium text-foreground mb-1">
               {currentEntry.error || t.toolPage.processingFailed}
@@ -992,8 +1001,8 @@ export function ToolPage() {
     }
 
     const conversionCompleteCard = (
-      <div className="flex-1 flex items-center justify-center">
-        <div className="text-center p-8 max-w-xs">
+      <div className="flex min-h-0 max-h-full flex-1 overflow-auto">
+        <div className="m-auto text-center p-8 max-w-xs">
           <div className="mx-auto w-16 h-16 rounded-2xl bg-emerald-50 dark:bg-emerald-950/30 flex items-center justify-center mb-4">
             <CheckCircle2 className="h-8 w-8 text-success-ink" />
           </div>
@@ -1364,8 +1373,10 @@ export function ToolPage() {
             </div>
           )}
 
-          {/* Tool header */}
-          <div className="flex items-center gap-3 p-4 border-b border-border shrink-0">
+          {/* Tool header. relative z-20 keeps it, and the Settings button, above any
+              preview content that overflows the image area (#2192); the nav arrows
+              inside the area are z-10 and the sheet and its backdrop z-40/z-50. */}
+          <div className="relative z-20 flex items-center gap-3 p-4 border-b border-border shrink-0 bg-background">
             <div className="p-2 rounded-lg bg-primary text-primary-foreground">
               <IconComponent className="h-5 w-5" />
             </div>
@@ -1384,7 +1395,9 @@ export function ToolPage() {
           {/* Main area: image viewer (full height) */}
           <section
             aria-label={t.a11y.imageArea}
-            className="flex-1 flex flex-col min-h-0 min-w-0"
+            // An inset focus ring: the default outline is drawn outside the section,
+            // under the z-20 header and peek bar and the clipped sides (#2192).
+            className="flex-1 flex flex-col min-h-0 min-w-0 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring"
             onKeyDown={hasBatchUi ? handleImageKeyDown : undefined}
             tabIndex={hasBatchUi ? 0 : undefined}
           >
@@ -1413,7 +1426,7 @@ export function ToolPage() {
             <button
               type="button"
               onClick={() => setMobileSettingsOpen(true)}
-              className="shrink-0 border-t border-border bg-background px-4 py-3 flex items-center justify-between"
+              className="relative z-20 shrink-0 border-t border-border bg-background px-4 py-3 flex items-center justify-between"
             >
               <div className="flex items-center gap-2">
                 <div className="w-8 h-1 rounded-full bg-muted-foreground/30" />

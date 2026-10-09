@@ -64,6 +64,12 @@ export function ocrOneFile(
     const clientJobId = generateId();
     let settled = false;
     let asyncMode = false;
+    // The browser finished sending the body: the last progress event or
+    // upload.onload, whichever it fires first. Only the 202 proves a job exists,
+    // so this decides between aborting and waiting, never to cancel by itself.
+    let uploadDone = false;
+    // A stop landed in the window after the upload and before the 202.
+    let cancelOnAnswer = false;
     let stallTimer: ReturnType<typeof setTimeout> | null = null;
     let es: EventSource | null = null;
 
@@ -163,13 +169,26 @@ export function ocrOneFile(
     const xhr = new XMLHttpRequest();
     xhr.timeout = 600_000;
     xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) callbacks.onUploadProgress((e.loaded / e.total) * 100);
+      if (!e.lengthComputable) return;
+      // Firefox fires upload.onload only once the answer starts, so the last
+      // progress event is the only signal there that the body is with the server.
+      if (e.loaded >= e.total) uploadDone = true;
+      callbacks.onUploadProgress((e.loaded / e.total) * 100);
+    };
+    xhr.upload.onload = () => {
+      uploadDone = true;
     };
     xhr.onload = () => {
       // The BullMQ worker owns long OCR jobs. Keep the progress subscription
       // alive and resolve from buildLegacyResultPayload(resultPayload).text.
       if (xhr.status === 202) {
         asyncMode = true;
+        // The scan was stopped while the server was still working on the upload:
+        // now that a job is known to exist, cancel it (#2136).
+        if (cancelOnAnswer) {
+          void cancelAbandonedJob(clientJobId, "ocr");
+          return;
+        }
         armStallTimer();
         return;
       }
@@ -207,8 +226,13 @@ export function ocrOneFile(
       // still unsettled has a job still running (#2093).
       // Posted first, so a teardown step that throws can't leave the job running.
       if (asyncMode && !settled) void cancelAbandonedJob(clientJobId, "ocr");
+      // The browser has sent the whole body and the server hasn't answered: it may be
+      // validating and decoding, and will still enqueue. Aborting would leave
+      // that job running with nothing to cancel it by, so the request stays open
+      // and the cancel goes out when the 202 arrives (#2136).
+      else if (uploadDone && !settled) cancelOnAnswer = true;
       rejectOnce(new Error("OCR scan stopped"));
-      xhr.abort();
+      if (!cancelOnAnswer) xhr.abort();
     });
     xhr.open("POST", appUrl("/api/v1/tools/image/ocr"));
     for (const [key, value] of formatHeaders()) {

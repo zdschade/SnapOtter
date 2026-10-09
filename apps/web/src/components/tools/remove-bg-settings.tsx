@@ -707,6 +707,13 @@ export function RemoveBgSettings({ onBgPreview }: RemoveBgSettingsProps = {}) {
   const [bgFilename, setBgFilename] = useState<string | null>(null);
   const [bgOriginalUrl, setBgOriginalUrl] = useState<string | null>(null);
   const [_effectsDownloadUrl, setEffectsDownloadUrl] = useState<string | null>(null);
+
+  // The file a finished removal belongs to, and the file the running one was
+  // started on. The result only counts while that file is the one loaded:
+  // swapping files (during the run or after it) must not leave the download
+  // and effects acting on another file's job (#2107).
+  const [bgResultFile, setBgResultFile] = useState<File | null>(null);
+  const runFileRef = useRef<File | null>(null);
   const [applyingEffects, setApplyingEffects] = useState(false);
   const [effectsError, setEffectsError] = useState<string | null>(null);
 
@@ -757,7 +764,14 @@ export function RemoveBgSettings({ onBgPreview }: RemoveBgSettingsProps = {}) {
   }, [settings._bgImageFile]);
 
   const hasFile = files.length > 0;
-  const bgRemoved = bgJobId !== null && !processing;
+  // A result counts while its file is the one loaded and the processor still
+  // holds it: Undo clears the processed URL and has to take Phase 2 with it.
+  const bgRemoved =
+    bgJobId !== null &&
+    !processing &&
+    Boolean(downloadUrl) &&
+    files.length === 1 &&
+    files[0] === bgResultFile;
 
   // Whether the user has configured any compositing effect.
   const hasEffectsToApply =
@@ -881,6 +895,7 @@ export function RemoveBgSettings({ onBgPreview }: RemoveBgSettingsProps = {}) {
     const phase1Settings: Record<string, unknown> = { model: settings.model };
     if (settings.edgeRefine != null) phase1Settings.edgeRefine = settings.edgeRefine;
     if (settings.decontaminate != null) phase1Settings.decontaminate = settings.decontaminate;
+    runFileRef.current = files[0] ?? null;
     processFiles(files, phase1Settings, { skipLibrarySave: true });
   };
 
@@ -894,6 +909,14 @@ export function RemoveBgSettings({ onBgPreview }: RemoveBgSettingsProps = {}) {
     const jobId = match[1];
     const filename = decodeURIComponent(match[2]);
     if (jobId && filename) {
+      // The processor writes a finished job back by entry index, so a file
+      // swapped in while it ran can show that job's URL. Only the file the
+      // run started on owns it; after a remount there is no run on record and
+      // the URL is the loaded entry's own.
+      const loaded = useFileStore.getState().files[0] ?? null;
+      const runFile = runFileRef.current;
+      if (runFile && runFile !== loaded) return;
+      setBgResultFile(loaded);
       setBgJobId(jobId);
       // A fresh removal settles any "expired, running again" note (#2119).
       setEffectsError(null);
@@ -914,7 +937,7 @@ export function RemoveBgSettings({ onBgPreview }: RemoveBgSettingsProps = {}) {
 
   // Phase 2: Apply effects and download
   const handleDownloadWithEffects = async () => {
-    if (!bgJobId || !bgFilename) return;
+    if (!bgRemoved || !bgJobId || !bgFilename) return;
 
     // Library file this run derives from (when opened from the file library):
     // the effects request is the FINAL step, so it carries the save choice.

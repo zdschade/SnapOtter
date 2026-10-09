@@ -13,7 +13,13 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   import.meta.url,
 ).toString();
 
-const RENDER_SCALE = 1.5; // on-screen scale; placements are normalized so this is cosmetic
+// Largest on-screen scale; placements are normalized so it is cosmetic. A narrower
+// area (a phone) gets a smaller one that fits the page to its width (#2190).
+const RENDER_SCALE = 1.5;
+const ROOT_PADDING = 32; // the root's p-4, both sides
+// Cap on the page bitmap (device pixels), so a high-DPR screen can't ask for a
+// canvas the browser refuses to allocate.
+const MAX_CANVAS_PIXELS = 16_777_216;
 const EXPORT_QUALITY = 2; // raster the baked PNG at ~2x page points for crispness
 const KONVA_CONTAINER_ID = "sign-konva-container";
 
@@ -50,6 +56,12 @@ export const SignCanvas = forwardRef<SignCanvasRef, Props>(function SignCanvas(
   ref,
 ) {
   const { t } = useTranslation();
+  const rootRef = useRef<HTMLDivElement>(null);
+  // Each page's on-screen scale, decided the first time the page is drawn from the
+  // area's width and then kept: a signature's pixel position was set against the
+  // page as drawn, so revisiting a page has to draw it at the same scale. Pages of
+  // different sizes (a landscape sheet in a portrait document) each fit the width.
+  const scalesRef = useRef<Map<number, number>>(new Map());
   const pdfCanvasRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<Konva.Stage | null>(null);
   const layerRef = useRef<Konva.Layer | null>(null);
@@ -78,6 +90,7 @@ export const SignCanvas = forwardRef<SignCanvasRef, Props>(function SignCanvas(
     let cancelled = false;
     setDocReady(false);
     setLoadFailed(false);
+    scalesRef.current.clear();
     for (const placed of placementsRef.current) placed.node.destroy();
     placementsRef.current = [];
     pageMetaRef.current.clear();
@@ -120,11 +133,33 @@ export const SignCanvas = forwardRef<SignCanvasRef, Props>(function SignCanvas(
       const pdfPage = await doc.getPage(page + 1);
       if (cancelled) return;
       const ptsViewport = pdfPage.getViewport({ scale: 1 });
-      const viewport = pdfPage.getViewport({ scale: RENDER_SCALE });
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
+      let scale = scalesRef.current.get(page);
+      if (scale === undefined) {
+        const available = (rootRef.current?.clientWidth ?? 0) - ROOT_PADDING;
+        scale =
+          available > 0 ? Math.min(RENDER_SCALE, available / ptsViewport.width) : RENDER_SCALE;
+        scalesRef.current.set(page, scale);
+      }
+      const viewport = pdfPage.getViewport({ scale });
+      // Everything else works in CSS pixels (the stage, the placement math); only
+      // the bitmap gets the screen's pixel ratio, or text on a phone is a blur.
+      const ratio = Math.max(
+        1,
+        Math.min(
+          window.devicePixelRatio || 1,
+          Math.sqrt(MAX_CANVAS_PIXELS / (viewport.width * viewport.height)),
+        ),
+      );
+      canvas.width = Math.floor(viewport.width * ratio);
+      canvas.height = Math.floor(viewport.height * ratio);
+      canvas.style.width = `${viewport.width}px`;
+      canvas.style.height = `${viewport.height}px`;
       setSize({ w: viewport.width, h: viewport.height });
-      await pdfPage.render({ canvas, viewport }).promise;
+      await pdfPage.render({
+        canvas,
+        viewport,
+        transform: ratio !== 1 ? [ratio, 0, 0, ratio, 0, 0] : undefined,
+      }).promise;
       if (cancelled) return;
 
       pageMetaRef.current.set(page, {
@@ -340,8 +375,15 @@ export const SignCanvas = forwardRef<SignCanvasRef, Props>(function SignCanvas(
   }
 
   return (
-    <div className="flex flex-1 flex-col items-center gap-3 p-4">
-      <div className="relative" style={{ width: size.w, height: size.h }}>
+    // Bounded by the preview area and scrolling inside it, so a page taller or
+    // wider than the area no longer spills over the settings controls. The children
+    // centre with auto margins, which (unlike items-center) never push the start of
+    // an overflowing page out of reach.
+    <div
+      ref={rootRef}
+      className="flex min-h-0 min-w-0 max-h-full flex-1 flex-col gap-3 overflow-auto p-4"
+    >
+      <div className="relative mx-auto shrink-0" style={{ width: size.w, height: size.h }}>
         <canvas
           ref={pdfCanvasRef}
           data-testid="sign-pdf-canvas"
@@ -349,7 +391,7 @@ export const SignCanvas = forwardRef<SignCanvasRef, Props>(function SignCanvas(
         />
         <div id={KONVA_CONTAINER_ID} className="absolute inset-0" />
       </div>
-      <div className="flex items-center gap-3 text-sm text-muted-foreground">
+      <div className="mx-auto flex shrink-0 items-center gap-3 text-sm text-muted-foreground">
         <button
           type="button"
           disabled={page === 0}

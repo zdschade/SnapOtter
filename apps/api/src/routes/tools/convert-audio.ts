@@ -1,4 +1,8 @@
-import { resolveEncoder } from "@snapotter/media-engine";
+import { createWriteStream } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
+import { basename, join } from "node:path";
+import { probeMedia, resolveEncoder, runFfmpeg } from "@snapotter/media-engine";
+import archiver from "archiver";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { runMediaTool } from "../../lib/media-tool.js";
@@ -8,9 +12,13 @@ import { createToolRoute } from "../tool-factory.js";
 // at 64 kbps, MPEG-2 (16/22.05 kHz) at 160 kbps. Reject instead of degrading.
 const MP3_BITRATE_CAPS: Record<number, number> = { 8000: 64, 16000: 160, 22050: 160 };
 
+const audioFormatEnum = z.enum(["mp3", "wav", "ogg", "flac", "m4a"]);
+
 const settingsSchema = z
   .object({
-    format: z.enum(["mp3", "wav", "ogg", "flac", "m4a"]).default("mp3"),
+    format: audioFormatEnum.optional(),
+    formats: z.array(audioFormatEnum).min(1).optional(),
+    zip: z.boolean().default(false).optional(),
     bitrateKbps: z.number().int().min(32).max(320).default(192),
     // Omitted = preserve the source sample rate (no -ar flag).
     sampleRate: z
@@ -32,8 +40,13 @@ const settingsSchema = z
       )
       .optional(),
   })
+  .refine((s) => Boolean(s.formats?.length || s.format), {
+    message: "At least one format must be specified",
+  })
   .superRefine((val, ctx) => {
-    if (val.format !== "mp3" || !val.sampleRate) return;
+    const targetFormats =
+      val.formats && val.formats.length > 0 ? val.formats : [val.format ?? "mp3"];
+    if (!targetFormats.includes("mp3") || !val.sampleRate) return;
     if (val.sampleRate === 96000) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -60,6 +73,53 @@ const CONTENT_TYPES: Record<string, string> = {
   m4a: "audio/mp4",
 };
 
+function audioArgsForFormat(
+  format: string,
+  inPath: string,
+  outPath: string,
+  bitrateKbps: number,
+  sampleRate?: number,
+): string[] {
+  const rate = sampleRate ? ["-ar", String(sampleRate)] : [];
+  switch (format) {
+    case "wav":
+      return ["-i", inPath, "-vn", "-c:a", "pcm_s16le", ...rate, outPath];
+    case "ogg": {
+      // libvorbis ABR (-b:a) fails with "encoder setup failed" when the bitrate is
+      // too high for the source sample rate (e.g. 8 kHz). Use quality VBR (-q:a),
+      // which adapts to the rate. Map bitrate -> quality (~bitrate/32: 192k -> q6).
+      const quality = (bitrateKbps / 32).toFixed(1);
+      return [
+        "-i",
+        inPath,
+        "-vn",
+        "-c:a",
+        resolveEncoder("vorbis"),
+        "-q:a",
+        quality,
+        ...rate,
+        outPath,
+      ];
+    }
+    case "flac":
+      return ["-i", inPath, "-vn", "-c:a", "flac", ...rate, outPath];
+    case "m4a":
+      return ["-i", inPath, "-vn", "-c:a", "aac", "-b:a", `${bitrateKbps}k`, ...rate, outPath];
+    default:
+      return [
+        "-i",
+        inPath,
+        "-vn",
+        "-c:a",
+        resolveEncoder("mp3"),
+        "-b:a",
+        `${bitrateKbps}k`,
+        ...rate,
+        outPath,
+      ];
+  }
+}
+
 export function registerConvertAudio(app: FastifyInstance) {
   createToolRoute(app, {
     toolId: "convert-audio",
@@ -70,62 +130,82 @@ export function registerConvertAudio(app: FastifyInstance) {
     processV2: async (ctx) => {
       const settings = settingsSchema.parse(ctx.settings);
       const base = ctx.inputs[0].filename.replace(/\.[^.]+$/, "");
-      const outName = `${base}.${settings.format}`;
+      const targetFormats =
+        settings.formats && settings.formats.length > 0
+          ? settings.formats
+          : [settings.format ?? "mp3"];
 
-      const { outPath } = await runMediaTool(ctx, outName, (inPath, out) => {
-        const rate = settings.sampleRate ? ["-ar", String(settings.sampleRate)] : [];
-        switch (settings.format) {
-          case "wav":
-            return ["-i", inPath, "-vn", "-c:a", "pcm_s16le", ...rate, out];
-          case "ogg": {
-            // libvorbis ABR (-b:a) fails with "encoder setup failed" when the bitrate is
-            // too high for the source sample rate (e.g. 8 kHz). Use quality VBR (-q:a),
-            // which adapts to the rate. Map bitrate -> quality (~bitrate/32: 192k -> q6).
-            const quality = (settings.bitrateKbps / 32).toFixed(1);
-            return [
-              "-i",
-              inPath,
-              "-vn",
-              "-c:a",
-              resolveEncoder("vorbis"),
-              "-q:a",
-              quality,
-              ...rate,
-              out,
-            ];
+      if (targetFormats.length === 1) {
+        const outFormat = targetFormats[0];
+        const outName = `${base}.${outFormat}`;
+        const { outPath } = await runMediaTool(ctx, outName, (inPath, out) =>
+          audioArgsForFormat(outFormat, inPath, out, settings.bitrateKbps, settings.sampleRate),
+        );
+        return {
+          scratchPath: outPath,
+          filename: outName,
+          contentType: CONTENT_TYPES[outFormat],
+        };
+      }
+
+      // Multiple target formats -> process sequentially and zip
+      const dir = join(ctx.scratchDir, "media");
+      await mkdir(dir, { recursive: true });
+      const inPath = join(dir, `in-${ctx.inputs[0].filename.replace(/[^A-Za-z0-9._-]/g, "_")}`);
+      await writeFile(inPath, ctx.inputs[0].buffer);
+
+      const outputPaths: string[] = [];
+      for (let i = 0; i < targetFormats.length; i++) {
+        const fmt = targetFormats[i];
+        const outName = `${base}.${fmt}`;
+        const outPath = join(dir, outName);
+        const args = audioArgsForFormat(
+          fmt,
+          inPath,
+          outPath,
+          settings.bitrateKbps,
+          settings.sampleRate,
+        );
+        ctx.report(
+          Math.round(5 + (i / targetFormats.length) * 85),
+          `Converting to ${fmt.toUpperCase()}`,
+        );
+        await runFfmpeg(args, { signal: ctx.signal, timeoutMs: 30 * 60_000 });
+        outputPaths.push(outPath);
+      }
+
+      if (settings.zip) {
+        ctx.report(92, "Creating archive");
+        const zipPath = join(dir, `${base}_converted.zip`);
+        await new Promise<void>((resolve, reject) => {
+          const output = createWriteStream(zipPath);
+          const archive = archiver("zip", { zlib: { level: 5 } });
+          output.on("close", () => resolve());
+          archive.on("error", (err: Error) => reject(err));
+          archive.pipe(output);
+          for (const outPath of outputPaths) {
+            archive.file(outPath, { name: basename(outPath) });
           }
-          case "flac":
-            return ["-i", inPath, "-vn", "-c:a", "flac", ...rate, out];
-          case "m4a":
-            return [
-              "-i",
-              inPath,
-              "-vn",
-              "-c:a",
-              "aac",
-              "-b:a",
-              `${settings.bitrateKbps}k`,
-              ...rate,
-              out,
-            ];
-          default:
-            return [
-              "-i",
-              inPath,
-              "-vn",
-              "-c:a",
-              resolveEncoder("mp3"),
-              "-b:a",
-              `${settings.bitrateKbps}k`,
-              ...rate,
-              out,
-            ];
-        }
-      });
+          void archive.finalize();
+        });
+
+        return {
+          scratchPath: zipPath,
+          filename: `${base}_converted.zip`,
+          contentType: "application/zip",
+        };
+      }
+
+      // Default: separate downloads (primary output + extraOutputs)
       return {
-        scratchPath: outPath,
-        filename: outName,
-        contentType: CONTENT_TYPES[settings.format],
+        scratchPath: outputPaths[0],
+        filename: basename(outputPaths[0]),
+        contentType: CONTENT_TYPES[targetFormats[0]] || "application/octet-stream",
+        extraOutputs: outputPaths.slice(1).map((p, i) => ({
+          name: basename(p),
+          scratchPath: p,
+          contentType: CONTENT_TYPES[targetFormats[i + 1]] || "application/octet-stream",
+        })),
       };
     },
   });

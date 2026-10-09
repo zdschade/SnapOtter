@@ -1,6 +1,8 @@
 import {
   ANALYTICS_EVENTS,
+  BASE_CONFIG,
   COMPRESS_PRESET_BY_ID,
+  CONVERSION_PRESET_BY_ID,
   getRequiredBundlesForTool,
   PYTHON_SIDECAR_TOOLS,
   SECTIONS,
@@ -23,7 +25,7 @@ import {
 } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Crop } from "react-image-crop";
-import { Link, useLocation, useParams } from "react-router";
+import { Link, Navigate, useLocation, useParams } from "react-router";
 import { BeforeAfterSlider } from "@/components/common/before-after-slider";
 import { BottomSheet } from "@/components/common/bottom-sheet";
 import { Dropzone } from "@/components/common/dropzone";
@@ -232,6 +234,21 @@ function FileSelectionInfo({
 export function ToolPage() {
   const { t } = useTranslation();
   const { section, toolId } = useParams<{ section: string; toolId: string }>();
+
+  // If the user visits a legacy preset URL (e.g. /image/jpg-to-png), redirect to the unified base tool with format pre-selected.
+  const preset = toolId ? CONVERSION_PRESET_BY_ID[toolId] : undefined;
+  if (preset) {
+    const targetFormat = preset.locked.format ?? preset.locked.outputFormat;
+    const search = targetFormat ? `?formats=${targetFormat}` : "";
+    const baseConfig = BASE_CONFIG[preset.base];
+    const targetSection = baseConfig
+      ? baseConfig.modality === "document"
+        ? "document"
+        : baseConfig.modality
+      : section;
+    return <Navigate to={`/${targetSection}/${preset.base}${search}`} replace />;
+  }
+
   const location = useLocation();
   const tool = useMemo(
     () => TOOLS.find((t) => t.id === toolId && t.route === `/${section}/${toolId}`),
@@ -1285,6 +1302,7 @@ export function ToolPage() {
               fileType={processedFileType}
               originalSize={originalSize ?? 0}
               downloadUrl={processedUrl}
+              downloads={currentEntry?.downloads}
               onUndo={handleUndo}
               onStartOver={startOver}
               currentToolId={tool?.id ?? ""}

@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { TOOLS } from "../../../packages/shared/src/constants.js";
-import { CONVERSION_PRESETS } from "../../../packages/shared/src/conversion-presets.js";
+import {
+  CONVERSION_PRESETS,
+  expandConversionPresets,
+} from "../../../packages/shared/src/conversion-presets.js";
 import {
   generateConversionKeywords,
   normalizeSearchQuery,
@@ -82,9 +85,9 @@ describe("normalizeSearchQuery", () => {
   });
 
   it("splits the joined form of every x-to-y tool id", () => {
-    const ids = TOOLS.map((t) => /^([a-z0-9]+)-to-([a-z0-9]+)$/.exec(t.id)).filter(
-      (m): m is RegExpExecArray => m !== null,
-    );
+    const ids = [...TOOLS, ...expandConversionPresets()]
+      .map((t) => /^([a-z0-9]+)-to-([a-z0-9]+)$/.exec(t.id))
+      .filter((m): m is RegExpExecArray => m !== null);
     expect(ids.length).toBeGreaterThan(20);
     for (const [id, from, to] of ids) {
       expect(normalizeSearchQuery(`${from}to${to}`), id).toBe(

@@ -76,6 +76,7 @@ export interface FileEntry {
    */
   errorCategory?: FeedbackErrorCategory | null;
   serverFileId?: string;
+  downloads?: Array<{ filename: string; downloadUrl: string }> | null;
   modality: Modality;
   previewKind: PreviewKind;
 }
@@ -105,6 +106,7 @@ function createEntry(file: File): FileEntry {
     claimed: false,
     error: null,
     serverFileId: undefined,
+    downloads: null,
     modality,
     previewKind: previewKindFor(modality),
   };

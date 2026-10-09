@@ -21,9 +21,9 @@ describe("conversion presets", () => {
     }
   });
 
-  it("presets are present in the exported TOOLS catalog", () => {
+  it("presets map to a valid base tool in the exported TOOLS catalog", () => {
     const toolIds = new Set(TOOLS.map((t) => t.id));
-    for (const p of CONVERSION_PRESETS) expect(toolIds.has(p.id)).toBe(true);
+    for (const p of CONVERSION_PRESETS) expect(toolIds.has(p.base)).toBe(true);
   });
 
   it("preset keywords include the natural phrasing", () => {

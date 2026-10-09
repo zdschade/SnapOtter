@@ -1,12 +1,12 @@
 import { ANALYTICS_EVENTS, isSafeMessageError, SafeError } from "@snapotter/shared";
 import { AlertCircle, ArrowLeft, CheckCircle2, Download, FileText, FolderPlus } from "lucide-react";
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Link } from "react-router";
 import { useTranslation } from "@/contexts/i18n-context";
 import { captureHandledError } from "@/lib/analytics";
 import { formatHeaders } from "@/lib/api";
 import { appUrl } from "@/lib/app-url";
-import { formatFileSize, triggerDownload } from "@/lib/download";
+import { downloadBlob, formatFileSize, triggerDownload } from "@/lib/download";
 import { classifyFeedbackError } from "@/lib/feedback";
 import { format } from "@/lib/format";
 import { isIgnoredError } from "@/lib/sentry-scrub";
@@ -71,6 +71,7 @@ interface ReviewPanelProps {
   fileType: string;
   originalSize: number;
   downloadUrl: string;
+  downloads?: Array<{ filename: string; downloadUrl: string }> | null;
   onUndo: () => void;
   onStartOver: () => void;
   currentToolId: string;
@@ -87,6 +88,7 @@ export function ReviewPanel({
   fileType,
   originalSize,
   downloadUrl,
+  downloads,
   onUndo,
   onStartOver,
   currentToolId,
@@ -96,6 +98,8 @@ export function ReviewPanel({
   savedLibraryFileId,
 }: ReviewPanelProps) {
   const { t } = useTranslation();
+  const [zipAnyway, setZipAnyway] = useState(false);
+  const [isZipping, setIsZipping] = useState(false);
 
   const isDataOutput = DATA_OUTPUT_TOOLS.has(currentToolId);
   const isMultiOutput = MULTI_OUTPUT_TOOLS.has(currentToolId);
@@ -105,10 +109,52 @@ export function ReviewPanel({
     return Math.round((1 - fileSize / originalSize) * 100);
   }, [originalSize, fileSize]);
 
-  const handleDownload = () => {
+  const handleDownload = async () => {
     import("@/lib/analytics").then(({ track }) => {
       track(ANALYTICS_EVENTS.RESULT_DOWNLOADED, { tool_id: currentToolId });
     });
+
+    if (downloads && downloads.length > 1) {
+      if (zipAnyway) {
+        setIsZipping(true);
+        try {
+          const JSZip = (await import("jszip")).default;
+          const zip = new JSZip();
+          await Promise.all(
+            downloads.map(async (item) => {
+              const res = await fetch(item.downloadUrl);
+              const blob = await res.blob();
+              zip.file(item.filename, blob);
+            }),
+          );
+          const zipBlob = await zip.generateAsync({ type: "blob" });
+          const base = filename.replace(/\.[^.]+$/, "");
+          downloadBlob(zipBlob, `${base}_converted.zip`);
+          useFileStore.getState().claimSelected();
+        } catch (err) {
+          console.error("Failed to generate ZIP archive", err);
+          downloads.forEach((item, index) => {
+            setTimeout(() => {
+              triggerDownload(item.downloadUrl, item.filename);
+            }, index * 250);
+          });
+          useFileStore.getState().claimSelected();
+        } finally {
+          setIsZipping(false);
+        }
+        return;
+      }
+
+      // Default: separate downloads for each format
+      downloads.forEach((item, index) => {
+        setTimeout(() => {
+          triggerDownload(item.downloadUrl, item.filename);
+        }, index * 250);
+      });
+      useFileStore.getState().claimSelected();
+      return;
+    }
+
     triggerDownload(downloadUrl, filename);
     useFileStore.getState().claimSelected();
   };
@@ -251,25 +297,84 @@ export function ReviewPanel({
 
       {/* Download button -- primary for non-data tools */}
       {!isDataOutput && (
-        <button
-          type="button"
-          data-download-button
-          onClick={handleDownload}
-          className="w-full py-2.5 rounded-lg bg-primary text-primary-foreground font-medium text-sm flex items-center justify-center gap-2 hover:bg-primary/90"
-        >
-          <Download className="h-4 w-4" />
-          {isMultiOutput
-            ? format(t.reviewPanel.downloadAllZipSize, { size: formatFileSize(fileSize) })
-            : hasBatchStats && successCount != null && successCount > 1
-              ? format(t.reviewPanel.downloadFilesZipSize, {
-                  count: successCount,
-                  size: formatFileSize(fileSize),
-                })
-              : format(t.reviewPanel.downloadTypeSize, {
-                  type: fileType,
-                  size: formatFileSize(fileSize),
-                })}
-        </button>
+        <div className="space-y-2">
+          {downloads && downloads.length > 1 && (
+            <label className="flex items-center gap-2 cursor-pointer select-none text-xs text-foreground py-0.5">
+              <input
+                type="checkbox"
+                checked={zipAnyway}
+                onChange={(e) => setZipAnyway(e.target.checked)}
+                className="rounded border-border text-primary focus:ring-primary h-4 w-4"
+              />
+              <span>Download all as a ZIP archive</span>
+            </label>
+          )}
+
+          <button
+            type="button"
+            data-download-button
+            onClick={handleDownload}
+            disabled={isZipping}
+            className="w-full py-2.5 rounded-lg bg-primary text-primary-foreground font-medium text-sm flex items-center justify-center gap-2 hover:bg-primary/90 disabled:opacity-50"
+          >
+            {isZipping ? (
+              <>
+                <div className="h-4 w-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                <span>Creating ZIP archive...</span>
+              </>
+            ) : (
+              <>
+                <Download className="h-4 w-4" />
+                {downloads && downloads.length > 1
+                  ? zipAnyway
+                    ? `Download ${downloads.length} files as ZIP`
+                    : `Download all ${downloads.length} formats`
+                  : isMultiOutput
+                    ? format(t.reviewPanel.downloadAllZipSize, { size: formatFileSize(fileSize) })
+                    : hasBatchStats && successCount != null && successCount > 1
+                      ? format(t.reviewPanel.downloadFilesZipSize, {
+                          count: successCount,
+                          size: formatFileSize(fileSize),
+                        })
+                      : format(t.reviewPanel.downloadTypeSize, {
+                          type: fileType,
+                          size: formatFileSize(fileSize),
+                        })}
+              </>
+            )}
+          </button>
+
+          {downloads && downloads.length > 1 && (
+            <div className="pt-1.5 space-y-1">
+              <span className="text-[11px] font-medium text-muted-foreground">
+                Individual format downloads:
+              </span>
+              <div className="grid grid-cols-1 gap-1">
+                {downloads.map((item) => (
+                  <div
+                    key={item.filename}
+                    className="flex items-center justify-between text-xs py-1.5 px-2.5 rounded-md bg-muted/40 border border-border/60 hover:bg-muted/70 transition-colors"
+                  >
+                    <span className="truncate font-mono text-[11px] text-foreground">
+                      {item.filename}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        triggerDownload(item.downloadUrl, item.filename);
+                        useFileStore.getState().claimSelected();
+                      }}
+                      className="text-primary hover:text-primary/80 font-medium text-xs flex items-center gap-1 shrink-0 ml-2"
+                    >
+                      <Download className="h-3 w-3" />
+                      Download
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
       )}
 
       {/* Result already auto-saved to the library: show where it went

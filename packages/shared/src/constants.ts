@@ -1,5 +1,9 @@
 import { expandCompressPresets } from "./compress-presets.js";
-import { expandConversionPresets } from "./conversion-presets.js";
+import {
+  BASE_CONFIG,
+  CONVERSION_PRESET_BY_ID,
+  expandConversionPresets,
+} from "./conversion-presets.js";
 import { AUDIO_INPUTS, IMAGE_INPUTS, SUBTITLE_INPUTS, VIDEO_INPUTS } from "./modality.js";
 import { toolSection } from "./section.js";
 import type { CategoryInfo, SocialMediaPreset, Tool } from "./types.js";
@@ -82,8 +86,8 @@ const BASE_TOOLS: Tool[] = [
   },
   {
     id: "convert",
-    name: "Convert Image",
-    description: "Convert between image formats",
+    name: "Convert raster images",
+    description: "Convert between raster image formats",
     category: "essentials",
     icon: "FileOutput",
     route: "/convert",
@@ -91,10 +95,35 @@ const BASE_TOOLS: Tool[] = [
     acceptedInputs: IMAGE_INPUTS,
     keywords: [
       "image converter",
+      "convert raster images",
+      "convert image",
       "jpg to png",
       "png to jpg",
       "heic to jpg",
+      "heic to png",
       "webp to png",
+      "webp to jpg",
+      "png to webp",
+      "jpg to webp",
+      "jpg to avif",
+      "png to avif",
+      "webp to avif",
+      "heic to avif",
+      "jpg to gif",
+      "png to gif",
+      "gif to jpg",
+      "gif to png",
+      "webp to gif",
+      "jpg to tiff",
+      "png to tiff",
+      "tiff to jpg",
+      "tiff to png",
+      "psd to jpg",
+      "psd to png",
+      "png to eps",
+      "jpg to eps",
+      "eps to png",
+      "eps to jpg",
       "convert image format",
     ],
     executionHint: "fast",
@@ -169,6 +198,17 @@ const BASE_TOOLS: Tool[] = [
     modality: "image",
     acceptedInputs: IMAGE_INPUTS,
     outputModality: "document",
+    keywords: [
+      "image to pdf",
+      "images to pdf",
+      "jpg to pdf",
+      "png to pdf",
+      "heic to pdf",
+      "tiff to pdf",
+      "webp to pdf",
+      "gif to pdf",
+      "eps to pdf",
+    ],
     executionHint: "fast",
   },
   {
@@ -875,13 +915,29 @@ const BASE_TOOLS: Tool[] = [
   {
     id: "convert-video",
     name: "Convert Video",
-    description: "Convert videos between MP4, MOV, and WebM",
+    description: "Convert videos between MP4, MOV, WebM, AVI, and MKV",
     category: "video-convert",
     icon: "Video",
     route: "/convert-video",
     modality: "video",
     acceptedInputs: VIDEO_INPUTS,
-    keywords: ["video converter", "mov to mp4", "mkv to mp4", "avi to mp4", "webm to mp4"],
+    keywords: [
+      "video converter",
+      "convert video",
+      "mov to mp4",
+      "mkv to mp4",
+      "avi to mp4",
+      "webm to mp4",
+      "mp4 to mov",
+      "mp4 to webm",
+      "webm to mov",
+      "mkv to mov",
+      "avi to mov",
+      "mp4 to avi",
+      "mov to avi",
+      "mkv to avi",
+      "avi to mkv",
+    ],
     executionHint: "long",
   },
   {
@@ -927,6 +983,7 @@ const BASE_TOOLS: Tool[] = [
     modality: "video",
     acceptedInputs: VIDEO_INPUTS,
     outputModality: "image",
+    keywords: ["video to gif", "mp4 to gif", "mov to gif", "mkv to gif", "avi to gif"],
     executionHint: "long",
   },
   {
@@ -1071,6 +1128,7 @@ const BASE_TOOLS: Tool[] = [
     route: "/gif-to-video",
     modality: "video",
     acceptedInputs: [".gif"],
+    keywords: ["gif to video", "gif to mp4", "gif to webm", "gif to mov"],
     executionHint: "fast",
   },
   {
@@ -1179,13 +1237,28 @@ const BASE_TOOLS: Tool[] = [
   {
     id: "convert-audio",
     name: "Convert Audio",
-    description: "Convert audio between MP3, WAV, OGG, and more",
+    description: "Convert audio between MP3, WAV, OGG, FLAC, M4A, and more",
     category: "audio-convert",
     icon: "AudioLines",
     route: "/convert-audio",
     modality: "audio",
     acceptedInputs: AUDIO_INPUTS,
-    keywords: ["audio converter", "m4a to mp3", "aac to mp3", "wav to mp3", "ogg to mp3"],
+    keywords: [
+      "audio converter",
+      "convert audio",
+      "m4a to mp3",
+      "m4a to wav",
+      "aac to mp3",
+      "aac to wav",
+      "aac to flac",
+      "ogg to mp3",
+      "ogg to wav",
+      "wav to mp3",
+      "mp3 to wav",
+      "flac to mp3",
+      "mp3 to flac",
+      "wav to flac",
+    ],
     executionHint: "fast",
   },
   {
@@ -1209,6 +1282,18 @@ const BASE_TOOLS: Tool[] = [
     modality: "video",
     acceptedInputs: VIDEO_INPUTS,
     outputModality: "audio",
+    keywords: [
+      "extract audio",
+      "video to audio",
+      "mp4 to mp3",
+      "mov to mp3",
+      "mkv to mp3",
+      "webm to mp3",
+      "avi to mp3",
+      "mp4 to wav",
+      "mov to wav",
+      "mp4 to ogg",
+    ],
     executionHint: "fast",
   },
   {
@@ -1449,7 +1534,16 @@ const BASE_TOOLS: Tool[] = [
     route: "/convert-spreadsheet",
     modality: "document",
     acceptedInputs: [".xlsx", ".xls", ".ods", ".csv"],
-    keywords: ["excel to csv", "xlsx to csv", "spreadsheet converter"],
+    keywords: [
+      "spreadsheet converter",
+      "convert spreadsheet",
+      "excel to csv",
+      "xlsx to csv",
+      "xls to csv",
+      "csv to excel",
+      "csv to xlsx",
+      "ods to csv",
+    ],
     executionHint: "long",
   },
   {
@@ -1921,11 +2015,7 @@ const BASE_TOOLS: Tool[] = [
   },
 ];
 
-export const TOOLS: Tool[] = [
-  ...BASE_TOOLS,
-  ...expandConversionPresets(BASE_TOOLS),
-  ...expandCompressPresets(BASE_TOOLS),
-];
+export const TOOLS: Tool[] = [...BASE_TOOLS, ...expandCompressPresets(BASE_TOOLS)];
 
 for (const tool of TOOLS) {
   const slug = `/${toolSection(tool)}`;
@@ -1937,9 +2027,23 @@ for (const tool of TOOLS) {
 export function apiToolPath(
   toolOrId: string | Pick<Tool, "id" | "modality" | "acceptedInputs">,
 ): string {
-  const tool = typeof toolOrId === "string" ? TOOLS.find((t) => t.id === toolOrId) : toolOrId;
-  if (!tool) throw new Error(`apiToolPath: unknown tool "${String(toolOrId)}"`);
-  return `/api/v1/tools/${toolSection(tool)}/${tool.id}`;
+  if (typeof toolOrId !== "string") {
+    return `/api/v1/tools/${toolSection(toolOrId)}/${toolOrId.id}`;
+  }
+  const tool = TOOLS.find((t) => t.id === toolOrId);
+  if (tool) {
+    return `/api/v1/tools/${toolSection(tool)}/${tool.id}`;
+  }
+  const preset = CONVERSION_PRESET_BY_ID[toolOrId];
+  if (preset) {
+    const baseCfg = BASE_CONFIG[preset.base];
+    const section = toolSection({
+      modality: baseCfg?.modality ?? "image",
+      acceptedInputs: preset.sourceInputs,
+    });
+    return `/api/v1/tools/${section}/${preset.id}`;
+  }
+  throw new Error(`apiToolPath: unknown tool "${String(toolOrId)}"`);
 }
 
 export const SOCIAL_MEDIA_PRESETS: SocialMediaPreset[] = [

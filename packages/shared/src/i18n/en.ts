@@ -553,7 +553,7 @@ export const en = {
     },
     crop: { name: "Crop Image", description: "Freeform crop, aspect ratio presets, shape crop" },
     rotate: { name: "Rotate & Flip Image", description: "Rotate, flip, and straighten images" },
-    convert: { name: "Convert Image", description: "Convert between image formats" },
+    convert: { name: "Convert raster images", description: "Convert between raster image formats" },
     compress: { name: "Compress Image", description: "Reduce file size by quality or target size" },
     "compress-image-to-20kb": {
       name: "Compress Image to 20 KB",

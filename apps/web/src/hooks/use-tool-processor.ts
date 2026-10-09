@@ -34,6 +34,7 @@ import { useFileStore } from "@/stores/file-store";
 interface ProcessResult {
   jobId: string;
   downloadUrl: string;
+  downloads?: Array<{ filename: string; downloadUrl: string }>;
   previewUrl?: string;
   originalSize: number;
   processedSize: number;
@@ -607,6 +608,7 @@ export function useToolProcessor(toolId: string) {
                 status: "completed",
                 originalSize: result.originalSize,
                 processedSize: result.processedSize,
+                downloads: result.downloads ?? null,
                 ...(result.savedFileId && saveModeRef.current === "overwrite"
                   ? { serverFileId: result.savedFileId }
                   : {}),
@@ -952,6 +954,7 @@ export function useToolProcessor(toolId: string) {
             status: "completed",
             originalSize: result.originalSize,
             processedSize: result.processedSize,
+            downloads: result.downloads ?? null,
             ...(result.savedFileId && saveModeRef.current === "overwrite"
               ? { serverFileId: result.savedFileId }
               : {}),

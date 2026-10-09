@@ -42,6 +42,26 @@ registerToolProcessFn({
   },
 });
 
+// Register a legacy-only test tool with extraOutputs
+registerToolProcessFn({
+  toolId: "contract-legacy-multi",
+  settingsSchema: { parse: (v: unknown) => v } as never,
+  process: async (inputBuffer: Buffer, _settings: unknown, filename: string) => {
+    return {
+      buffer: inputBuffer,
+      filename,
+      contentType: "application/octet-stream",
+      extraOutputs: [
+        {
+          name: "extra.bin",
+          buffer: Buffer.from("extra-output"),
+          contentType: "application/octet-stream",
+        },
+      ],
+    };
+  },
+});
+
 let testApp: TestApp;
 
 beforeAll(async () => {
@@ -191,5 +211,34 @@ describe("V2 process contract", () => {
     expect(result).not.toBeNull();
     const outputBuffer = await getObjectBuffer(result!.outputRefs[0]);
     expect(outputBuffer.toString()).toBe("echo-me");
+  });
+
+  it("legacy adapter preserves extraOutputs for multi-format tools", async () => {
+    const jobId = randomUUID();
+    const buf = Buffer.from("primary-output");
+
+    const ref = `uploads/${jobId}/primary.bin`;
+    await putObject(ref, buf);
+
+    const data: ToolJobData = {
+      jobId,
+      toolId: "contract-legacy-multi",
+      userId: null,
+      pool: "image",
+      inputRefs: [ref],
+      filename: "primary.bin",
+      settings: {},
+      kind: "tool",
+    };
+
+    await enqueueToolJob(data);
+
+    const result = await waitForJob("image", jobId, 10_000);
+    expect(result).not.toBeNull();
+    expect(result!.outputRefs.length).toBe(2);
+    const primaryBuf = await getObjectBuffer(result!.outputRefs[0]);
+    expect(primaryBuf.toString()).toBe("primary-output");
+    const extraBuf = await getObjectBuffer(result!.outputRefs[1]);
+    expect(extraBuf.toString()).toBe("extra-output");
   });
 });

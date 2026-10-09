@@ -85,6 +85,12 @@ export interface LegacyToolProcessResult {
   contentType: string;
   /** Extra fields merged into the tool's result JSON, as with ToolProcessResultV2. */
   resultPayload?: Record<string, unknown>;
+  extraOutputs?: Array<{
+    name: string;
+    buffer?: Buffer;
+    scratchPath?: string;
+    contentType: string;
+  }>;
 }
 
 // ── Tool route config ─────────────────────────────────────────
@@ -198,6 +204,7 @@ function adaptLegacyProcess(config: AnyToolRouteConfig): ToolProcessV2 {
       filename: result.filename,
       contentType: result.contentType,
       resultPayload: result.resultPayload,
+      extraOutputs: result.extraOutputs,
     };
   };
 }
@@ -665,9 +672,21 @@ export function createToolRoute<T>(app: FastifyInstance, config: ToolRouteConfig
               )
               .catch(() => {});
 
+            const downloads =
+              result.outputRefs && result.outputRefs.length > 1
+                ? result.outputRefs.map((ref) => {
+                    const name = ref.split("/").slice(2).join("/");
+                    return {
+                      filename: name,
+                      downloadUrl: `/api/v1/download/${jobId}/${encodeURIComponent(name)}`,
+                    };
+                  })
+                : undefined;
+
             return reply.send({
               jobId,
               downloadUrl: `/api/v1/download/${jobId}/${encodeURIComponent(result.filename)}`,
+              downloads,
               previewUrl: result.previewRef
                 ? `/api/v1/download/${jobId}/${result.previewRef.split("/").pop()}`
                 : undefined,

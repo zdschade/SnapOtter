@@ -246,6 +246,7 @@ async function readToolInputs(
 export interface LegacyResultPayload {
   jobId: string;
   downloadUrl: string;
+  downloads?: Array<{ filename: string; downloadUrl: string }>;
   previewUrl?: string;
   originalSize: number;
   processedSize: number;
@@ -264,6 +265,15 @@ export function buildLegacyResultPayload(
     originalSize: jobResult.originalSize,
     processedSize: jobResult.processedSize,
   };
+  if (jobResult.outputRefs && jobResult.outputRefs.length > 1) {
+    payload.downloads = jobResult.outputRefs.map((ref) => {
+      const name = ref.split("/").slice(2).join("/");
+      return {
+        filename: name,
+        downloadUrl: `/api/v1/download/${jobId}/${encodeURIComponent(name)}`,
+      };
+    });
+  }
   if (jobResult.previewRef) {
     const previewFilename = jobResult.previewRef.split("/").pop();
     payload.previewUrl = `/api/v1/download/${jobId}/${previewFilename}`;

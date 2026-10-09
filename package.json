@@ -29,7 +29,7 @@
     "node": ">=22.22.0"
   },
   "scripts": {
-    "dev": "turbo dev & (cd .local-wiki && npm run docs:dev) &",
+    "dev": "turbo dev",
     "wiki:dev": "cd .local-wiki && npm run docs:dev",
     "docs:dev": "pnpm --filter @snapotter/docs docs:dev",
     "i18n:translate": "apps/api/node_modules/.bin/tsx scripts/i18n/translate.mjs",
@@ -38,6 +38,7 @@
     "lint": "turbo lint && pnpm lint:root",
     "lint:root": "biome check scripts config docker branding signatures .vscode tests/*.cjs tests/*.mjs tests/*.ts tests/baseline tests/benchmark tests/e2e tests/e2e-analytics tests/e2e-demo tests/e2e-docker tests/e2e-docs tests/e2e-editor tests/e2e-landing tests/e2e-noauth tests/fixtures/gen-manifest.mjs tests/fixtures/gen-synthetic-content.mjs tests/fixtures/index.ts tests/fixtures/manifest.json tests/helpers tests/integration tests/qa tests/setup tests/unit",
     "lint:fix": "biome check --write .",
+    "lint-staged": "lint-staged",
     "clean": "turbo clean",
     "typecheck": "turbo typecheck",
     "test": "vitest run",
